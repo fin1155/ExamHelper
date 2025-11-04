@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Голосовой ассистент</title>
+    <style>
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      body { 
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif; 
+        margin: 0; 
+        padding: 1rem;
+        background: #0f172a; 
+        color: #e2e8f0;
+        min-height: 100vh;
+      }
+      .container { max-width: 480px; margin: 0 auto; text-align: center; }
+      h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+      p { font-size: 0.9rem; opacity: 0.8; margin-bottom: 1.5rem; }
+      .controls { margin-bottom: 1.5rem; }
+      select {
+        width: 100%;
+        padding: 0.75rem;
+        margin-bottom: 0.75rem;
+        border-radius: 0.5rem;
+        border: 1px solid #334155;
+        background: #1e293b;
+        color: #e2e8f0;
+        font-size: 0.95rem;
+      }
+      button {
+        width: 100%;
+        padding: 1.25rem;
+        font-size: 1.1rem;
+        border-radius: 9999px;
+        border: none;
+        cursor: pointer;
+        background: linear-gradient(135deg, #38bdf8, #6366f1);
+        color: #fff;
+        font-weight: 600;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        touch-action: manipulation;
+      }
+      button:active { transform: scale(0.96); box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4); }
+      button.recording { background: linear-gradient(135deg, #f43f5e, #ef4444); }
+      #status { margin-top: 1rem; min-height: 1.5rem; font-size: 0.9rem; opacity: 0.9; }
+      audio { width: 100%; margin-top: 1rem; border-radius: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🎤 Голосовой ассистент</h1>
+      <p>Нажми кнопку, говори — запись остановится автоматически после паузы.</p>
+      
+      <div class="controls">
+        <select id="micSelect">
+          <option value="">Микрофон: загрузка...</option>
+        </select>
+        <select id="speakerSelect">
+          <option value="">Динамик: загрузка...</option>
+        </select>
+      </div>
+      
+      <button id="recordButton">Начать запись</button>
+      <div id="status"></div>
+      <audio id="replyAudio" controls></audio>
+    </div>
+    <script>
+      const button = document.getElementById('recordButton');
+      const statusEl = document.getElementById('status');
+      const audioEl = document.getElementById('replyAudio');
+      const micSelect = document.getElementById('micSelect');
+      const speakerSelect = document.getElementById('speakerSelect');
+      let mediaRecorder = null;
+      let chunks = [];
+      let isRecording = false;
+      let silenceTimeout = null;
+      let audioContext = null;
+      let analyser = null;
+      let silenceThreshold = -50;
+      let silenceDuration = 1000;
+      let selectedMicId = null;
+      let selectedSpeakerId = null;
+      let selectedMimeType = '';
+      let recordedMimeType = '';
+      let fileExtension = 'webm';
+
+      function resolveMimeType() {
+        const candidates = [
+          'audio/webm;codecs=opus',
+          'audio/webm',
+          'audio/mp4;codecs=mp4a.40.2',
+          'audio/mp4'
+        ];
+
+        const supported = candidates.find(type => {
+          return typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type);
+        });
+
+        if (supported) {
+          selectedMimeType = supported;
+          fileExtension = supported.includes('mp4') ? 'm4a' : 'webm';
+        } else {
+          selectedMimeType = '';
+          fileExtension = 'webm';
+        }
+      }
+
+      function resolveExtension(mimeType) {
+        if (!mimeType) return 'webm';
+        const normalized = mimeType.toLowerCase();
+
+        if (normalized.includes('mp4') || normalized.includes('mpeg') || normalized.includes('aac')) {
+          return 'm4a';
+        }
+        if (normalized.includes('ogg')) {
+          return 'ogg';
+        }
+        if (normalized.includes('wav')) {
+          return 'wav';
+        }
+        return 'webm';
+      }
+
+      function detectSilence(stream) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        const microphone = audioContext.createMediaStreamSource(stream);
+        analyser.smoothingTimeConstant = 0.8;
+        analyser.fftSize = 1024;
+        microphone.connect(analyser);
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        function checkSilence() {
+          if (!isRecording) return;
+          
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          const db = 20 * Math.log10(average / 255);
+
+          if (db < silenceThreshold) {
+            if (!silenceTimeout) {
+              silenceTimeout = setTimeout(() => {
+                if (isRecording) {
+                  console.log('Тишина обнаружена, останавливаем запись');
+                  mediaRecorder.stop();
+                }
+              }, silenceDuration);
+            }
+          } else {
+            if (silenceTimeout) {
+              clearTimeout(silenceTimeout);
+              silenceTimeout = null;
+            }
+          }
+
+          requestAnimationFrame(checkSilence);
+        }
+
+        checkSilence();
+      }
+
+      async function loadDevices() {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const mics = devices.filter(d => d.kind === 'audioinput');
+          const speakers = devices.filter(d => d.kind === 'audiooutput');
+          
+          micSelect.innerHTML = mics.map(d => 
+            `<option value="${d.deviceId}">${d.label || 'Микрофон ' + (mics.indexOf(d) + 1)}</option>`
+          ).join('');
+          
+          speakerSelect.innerHTML = speakers.map(d => 
+            `<option value="${d.deviceId}">${d.label || 'Динамик ' + (speakers.indexOf(d) + 1)}</option>`
+          ).join('');
+          
+          if (mics.length > 0) selectedMicId = mics[0].deviceId;
+          if (speakers.length > 0) selectedSpeakerId = speakers[0].deviceId;
+        } catch (err) {
+          console.error('Ошибка загрузки устройств:', err);
+        }
+      }
+      
+      micSelect.addEventListener('change', (e) => {
+        selectedMicId = e.target.value;
+      });
+      
+      speakerSelect.addEventListener('change', (e) => {
+        selectedSpeakerId = e.target.value;
+        if (audioEl.setSinkId) {
+          audioEl.setSinkId(selectedSpeakerId).catch(err => console.error('Ошибка setSinkId:', err));
+        }
+      });
+
+      async function initRecorder() {
+        try {
+          const constraints = { audio: selectedMicId ? { deviceId: selectedMicId } : true };
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+          const options = selectedMimeType ? { mimeType: selectedMimeType } : undefined;
+          try {
+            mediaRecorder = new MediaRecorder(stream, options);
+          } catch (err) {
+            console.warn('MediaRecorder init failed with preferred mimeType, retrying without it:', err);
+            mediaRecorder = new MediaRecorder(stream);
+          }
+
+          recordedMimeType = mediaRecorder.mimeType || selectedMimeType || '';
+
+          mediaRecorder.addEventListener('dataavailable', (event) => {
+            if (event.data && event.data.size > 0) {
+              if (!recordedMimeType && event.data.type) {
+                recordedMimeType = event.data.type;
+              }
+              chunks.push(event.data);
+            }
+          });
+
+          mediaRecorder.addEventListener('stop', async () => {
+            isRecording = false;
+            if (silenceTimeout) {
+              clearTimeout(silenceTimeout);
+              silenceTimeout = null;
+            }
+            if (audioContext) {
+              audioContext.close();
+              audioContext = null;
+            }
+            
+            statusEl.textContent = 'Отправляю на сервер...';
+            if (chunks.length === 0) {
+              await new Promise((resolve) => {
+                const handle = (event) => {
+                  if (event.data && event.data.size > 0) {
+                    if (!recordedMimeType && event.data.type) {
+                      recordedMimeType = event.data.type;
+                    }
+                    chunks.push(event.data);
+                  }
+                  mediaRecorder.removeEventListener('dataavailable', handle);
+                  resolve();
+                };
+                mediaRecorder.addEventListener('dataavailable', handle, { once: true });
+                try {
+                  mediaRecorder.requestData();
+                } catch (err) {
+                  console.warn('requestData() не поддерживается:', err);
+                }
+              });
+            }
+
+            const firstChunkType = chunks[0] && chunks[0].type ? chunks[0].type : '';
+            let effectiveMime = recordedMimeType || firstChunkType || selectedMimeType;
+            if (!effectiveMime) {
+              console.warn('Не удалось определить MIME, используем audio/mp4 по умолчанию');
+              effectiveMime = 'audio/mp4';
+            }
+            const blob = new Blob(chunks, { type: effectiveMime });
+            chunks = [];
+
+            const formData = new FormData();
+            const effectiveExtension = resolveExtension(effectiveMime) || fileExtension;
+            formData.append('file', blob, `input.${effectiveExtension}`);
+
+            try {
+              const response = await fetch('/voice', {
+                method: 'POST',
+                body: formData,
+              });
+
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+              }
+
+              const arrayBuffer = await response.arrayBuffer();
+              const audioBlob = new Blob([arrayBuffer], { type: 'audio/wav' });
+              const url = URL.createObjectURL(audioBlob);
+              audioEl.src = url;
+              
+              // Попытка автовоспроизведения
+              audioEl.play().then(() => {
+                statusEl.textContent = 'Ответ воспроизводится...';
+              }).catch(err => {
+                console.log('Автоплей заблокирован:', err);
+                statusEl.textContent = 'Ответ получен. Нажми Play ⮖️';
+              });
+            } catch (error) {
+              console.error(error);
+              statusEl.textContent = 'Ошибка: ' + error.message;
+            } finally {
+              button.disabled = false;
+              button.classList.remove('recording');
+              button.textContent = 'Начать запись';
+              recordedMimeType = '';
+            }
+          });
+          
+          // Сохраняем stream для detectSilence
+          mediaRecorder.stream = stream;
+        } catch (error) {
+          console.error(error);
+          statusEl.textContent = 'Нет доступа к микрофону';
+          button.disabled = true;
+        }
+      }
+
+      // Загрузка устройств при загрузке страницы
+      resolveMimeType();
+      loadDevices();
+      
+      button.addEventListener('click', async () => {
+        if (!mediaRecorder) {
+          await initRecorder();
+          await loadDevices(); // Обновляем после получения разрешения
+        }
+
+        if (!mediaRecorder) {
+          return;
+        }
+
+        if (!isRecording) {
+          chunks = [];
+          mediaRecorder.start();
+          isRecording = true;
+          button.classList.add('recording');
+          button.textContent = 'Говорите... (автоостановка)';
+          statusEl.textContent = 'Идёт запись... (остановится после паузы)';
+          
+          // Запускаем детектор тишины
+          detectSilence(mediaRecorder.stream);
+        } else {
+          mediaRecorder.stop();
+          statusEl.textContent = 'Завершение записи...';
+        }
+      });
+    </script>
+  </body>
+</html>

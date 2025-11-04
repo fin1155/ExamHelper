@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-openrouter/auto}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://openrouter.ai/api/v1}
+      - OPENAI_SYSTEM_PROMPT=${OPENAI_SYSTEM_PROMPT:-Ты дружелюбный голосовой ассистент. Отвечай коротко и по делу.}
